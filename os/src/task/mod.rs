@@ -126,6 +126,13 @@ impl TaskManager {
         inner.tasks[inner.current_task].get_trap_cx()
     }
 
+    /// Get current task
+    fn get_current_task(&self) -> &'static mut TaskControlBlock {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        unsafe { &mut *(&mut inner.tasks[current] as *mut TaskControlBlock)}
+    }
+
     /// Change the current 'Running' task's program break
     pub fn change_current_program_brk(&self, size: i32) -> Option<usize> {
         let mut inner = self.inner.exclusive_access();
@@ -201,4 +208,9 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Get current TaskControlBlock
+pub fn get_current_task() -> &'static mut TaskControlBlock {
+    TASK_MANAGER.get_current_task()
 }

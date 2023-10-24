@@ -58,11 +58,26 @@ impl MemorySet {
         end_va: VirtAddr,
         permission: MapPermission,
     ) {
-        self.push(
-            MapArea::new(start_va, end_va, MapType::Framed, permission),
-            None,
-        );
+        let mut map_area = MapArea::new(start_va, end_va, MapType::Framed, permission);
+        map_area.set_end_va(end_va);
+        self.push(map_area, None);
     }
+    /// Umap memory
+    pub fn unmap(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> isize {
+        let start_vpn = start_va.floor();
+        let index = self.areas.iter().position(|area| {
+            area.vpn_range.get_start() == start_vpn
+                && area.vpn_range.get_end() == end_va.ceil()
+                && area.get_end_va() == end_va
+        });
+        if index.is_none() {
+            return -1;
+        }
+        let mut map_area = self.areas.remove(index.unwrap());
+        map_area.unmap(&mut self.page_table);
+        return 0;
+    }
+
     fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {
@@ -269,6 +284,8 @@ pub struct MapArea {
     data_frames: BTreeMap<VirtPageNum, FrameTracker>,
     map_type: MapType,
     map_perm: MapPermission,
+    // Only used for mmap/munmap memory
+    end_va: VirtAddr,
 }
 
 impl MapArea {
@@ -285,7 +302,16 @@ impl MapArea {
             data_frames: BTreeMap::new(),
             map_type,
             map_perm,
+            end_va: VirtAddr::from(0),
         }
+    }
+
+    pub fn set_end_va(&mut self, end_va: VirtAddr) {
+        self.end_va = end_va;
+    }
+
+    pub fn get_end_va(&self) -> VirtAddr {
+        self.end_va
     }
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         let ppn: PhysPageNum;
