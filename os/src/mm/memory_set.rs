@@ -54,6 +54,43 @@ impl MemorySet {
     pub fn token(&self) -> usize {
         self.page_table.token()
     }
+
+    /// mmap allocate memory
+    pub fn mmap(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) -> isize {
+        for vpn in VPNRange::new(start_va.floor(), end_va.ceil()) {
+            // 虚拟地址是否已经映射
+            let pte = self.translate(vpn);
+            if let Some(pte) = pte {
+                // 虚拟地址已存在映射
+                if pte.is_valid() {
+                    return -1;
+                }
+            }
+        }
+        self.insert_framed_area(start_va, end_va, permission);
+        0
+    }
+
+    /// munmap deallocate page
+    pub fn unmap(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> isize {
+        let start_vpn = start_va.floor();
+        let index = self.areas.iter().position(|area| {
+            let area_start = area.vpn_range.get_start();
+            let area_end = area.vpn_range.get_end();
+            area_start == start_vpn && area_end == end_va.ceil()
+        });
+        if index.is_none() {
+            return -1;
+        }
+        let mut map_area = self.areas.remove(index.unwrap());
+        map_area.unmap(&mut self.page_table);
+        return 0;
+    }
     /// Assume that no conflicts.
     pub fn insert_framed_area(
         &mut self,
@@ -320,11 +357,13 @@ impl MemorySet {
     }
 }
 /// map area structure, controls a contiguous piece of virtual memory
+#[derive(Debug)]
 pub struct MapArea {
     vpn_range: VPNRange,
     data_frames: BTreeMap<VirtPageNum, FrameTracker>,
     map_type: MapType,
     map_perm: MapPermission,
+    // end_va: VirtAddr,
 }
 
 impl MapArea {

@@ -112,16 +112,27 @@ impl Inode {
             .modify(new_inode_block_offset, |new_inode: &mut DiskInode| {
                 new_inode.initialize(DiskInodeType::File);
             });
+
         self.modify_disk_inode(|root_inode| {
             // append file in the dirent
             let file_count = (root_inode.size as usize) / DIRENT_SZ;
-            let new_size = (file_count + 1) * DIRENT_SZ;
-            // increase size
-            self.increase_size(new_size as u32, root_inode, &mut fs);
+            let empty_dirent_index = self.find_empty_dirent(root_inode);
+            let write_index;
+            if let Some(index) = empty_dirent_index {
+                write_index = index;
+            } else {
+                let new_size = (file_count + 1) * DIRENT_SZ;
+                // increase size
+                self.increase_size(new_size as u32, root_inode, &mut fs);
+                write_index = file_count;
+            } 
+            // let new_size = (file_count + 1) * DIRENT_SZ;
+            // // increase size
+            // self.increase_size(new_size as u32, root_inode, &mut fs);
             // write dirent
             let dirent = DirEntry::new(name, new_inode_id);
             root_inode.write_at(
-                file_count * DIRENT_SZ,
+                write_index * DIRENT_SZ,
                 dirent.as_bytes(),
                 &self.block_device,
             );
@@ -182,5 +193,135 @@ impl Inode {
             }
         });
         block_cache_sync_all();
+    }
+
+    /// find dirent and index of dirent from name
+    fn find_dirent(&self, name: &str) -> Option<(usize, DirEntry)> {
+        self.read_disk_inode(|root_inode| -> Option<(usize, DirEntry)> {
+            assert!(root_inode.is_dir());
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let mut dirent = DirEntry::empty();
+            for i in 0..file_count {
+                assert_eq!(
+                    root_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device,),
+                    DIRENT_SZ,
+                );
+                if dirent.name() == name {
+                    return Some((i, dirent));
+                }
+            }
+            None
+        })
+    }
+
+    /// find empty dirent
+    fn find_empty_dirent(&self, disk_inode: &DiskInode) -> Option<usize> {
+        assert!(disk_inode.is_dir());
+        let file_count = (disk_inode.size as usize) / DIRENT_SZ;
+        let mut dirent = DirEntry::empty();
+        let empty_dirent = DirEntry::empty();
+        for i in 0..file_count {
+            assert_eq!(
+                disk_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device,),
+                DIRENT_SZ,
+            );
+            if dirent == empty_dirent {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// count hardlink
+    fn count_inode(&self, inode_id: u32) -> usize {
+        self.read_disk_inode(|root_inode| -> usize {
+            assert!(root_inode.is_dir());
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let mut dirent = DirEntry::empty();
+            let mut count = 0;
+            for i in 0..file_count {
+                assert_eq!(
+                    root_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device,),
+                    DIRENT_SZ,
+                );
+                if dirent.inode_id() == inode_id {
+                    count += 1;
+                }
+            }
+            count
+        })
+    }
+
+    /// create hardlink
+    pub fn create_hardlink(&self, old_name: &str, name: &str) -> isize {
+        let inode_id = self.read_disk_inode(|disk_inode| {
+            self.find_inode_id(old_name, disk_inode)
+        });
+        if inode_id.is_none() {
+            return -1;
+        }
+        let inode_id = inode_id.unwrap();
+        // check if the file exist
+        let ret = self.modify_disk_inode(|root_inode| -> isize {
+            assert!(root_inode.is_dir());
+            let file_count = (root_inode.size as usize) / DIRENT_SZ;
+            let new_size = (file_count + 1) * DIRENT_SZ;
+            self.increase_size(new_size as u32, root_inode, &mut self.fs.lock());
+            // write dirent
+            let dirent = DirEntry::new(name, inode_id);
+            root_inode.write_at(
+                file_count * DIRENT_SZ,
+                dirent.as_bytes(),
+                &self.block_device,
+            );
+            
+            0
+        });
+        block_cache_sync_all();
+        ret
+    }
+
+    /// unlink a hard link
+    pub fn unlink(&self, name: &str) -> isize {
+        let find_res = self.find_dirent(name);
+        if find_res.is_none() {
+            return -1;
+        }
+        let (i, dirent) = find_res.unwrap();
+        // Delete dirent by override dirent to empty
+        self.modify_disk_inode(|disk_inode| {
+            disk_inode.write_at(i * DIRENT_SZ, DirEntry::empty().as_bytes(), &self.block_device);
+        });
+
+        let count = self.count_inode(dirent.inode_id());
+        // Last dirent, clear data, and free inode
+        if count == 0 {
+            let (blodk_id, block_offset) = self.fs.lock().get_disk_inode_pos(dirent.inode_id());
+            let inode = Arc::new(Inode::new(blodk_id, block_offset, self.fs.clone(), self.block_device.clone()));
+            inode.clear();
+            self.fs.lock().dealloc_inode(dirent.inode_id() as u32);
+        }
+        block_cache_sync_all();
+        0
+    }
+
+    /// stat, return inode id, nlinks, file mode
+    pub fn stat(&self, name: &str) -> Option<(usize, usize, usize)> {
+        let find_res = self.find_dirent(name);
+        if find_res.is_none() {
+            return None;
+        }
+        let (_, dirent) = find_res.unwrap();
+        let inode_id = dirent.inode_id();
+        let n = self.count_inode(inode_id);
+        let (blodk_id, block_offset) = self.fs.lock().get_disk_inode_pos(dirent.inode_id());
+        let inode = Arc::new(Inode::new(blodk_id, block_offset, self.fs.clone(), self.block_device.clone()));
+        let mut mode: usize = 0o100000;
+        inode.read_disk_inode(|disk_node| {
+            if disk_node.is_dir() {
+                mode = 0o040000;
+            }
+        });
+        Some((inode_id as usize, n, mode))
     }
 }

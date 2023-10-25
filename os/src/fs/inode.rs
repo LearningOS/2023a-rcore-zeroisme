@@ -8,7 +8,7 @@ use super::File;
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
-use alloc::sync::Arc;
+use alloc::{sync::Arc, string::String};
 use alloc::vec::Vec;
 use bitflags::*;
 use easy_fs::{EasyFileSystem, Inode};
@@ -155,4 +155,19 @@ impl File for OSInode {
         }
         total_write_size
     }
+}
+
+/// create hard link new_name -> old_name
+pub fn linkat(old_name: String, new_name: String) -> isize {
+    ROOT_INODE.create_hardlink(&old_name, &new_name)
+}
+
+/// unlink hard link name
+pub fn unlink(name: String) -> isize {
+    ROOT_INODE.unlink(&name)
+}
+
+/// stat
+pub fn stat(name: String) -> Option<(usize, usize, usize)> {
+    ROOT_INODE.stat(&name)
 }

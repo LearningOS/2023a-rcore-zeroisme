@@ -48,6 +48,7 @@ lazy_static! {
 }
 
 /// Abstract structure of PID
+#[derive(PartialEq, Eq)]
 pub struct PidHandle(pub usize);
 
 impl Drop for PidHandle {

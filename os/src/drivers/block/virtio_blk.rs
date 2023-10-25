@@ -55,6 +55,7 @@ impl Hal for VirtioHal {
             if i == 0 {
                 ppn_base = frame.ppn;
             }
+            info!("dma_alloc: 0x{:x}", frame.ppn.0);
             assert_eq!(frame.ppn.0, ppn_base.0 + i);
             QUEUE_FRAMES.exclusive_access().push(frame);
         }

@@ -1,15 +1,18 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{BIG_STRIDE, MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::fs::{File, Stdin, Stdout};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_ms;
 use crate::trap::{trap_handler, TrapContext};
+use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use core::cmp::Ordering;
 
 /// Task control block structure
 ///
@@ -21,7 +24,6 @@ pub struct TaskControlBlock {
 
     /// Kernel stack corresponding to PID
     pub kernel_stack: KernelStack,
-
     /// Mutable
     inner: UPSafeCell<TaskControlBlockInner>,
 }
@@ -38,6 +40,33 @@ impl TaskControlBlock {
     }
 }
 
+impl Ord for TaskControlBlock {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let inner = self.inner_exclusive_access();
+        let other_inner = other.inner_exclusive_access();
+        if inner.stride < other_inner.stride {
+            Ordering::Greater
+        } else if inner.stride == other_inner.stride {
+            Ordering::Equal
+        } else {
+            Ordering::Less
+        }
+    }
+}
+
+impl Eq for TaskControlBlock {}
+
+impl PartialEq for TaskControlBlock {
+    fn eq(&self, other: &Self) -> bool {
+        self.pid == other.pid
+    }
+}
+
+impl PartialOrd for TaskControlBlock {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 pub struct TaskControlBlockInner {
     /// The physical page number of the frame where the trap context is placed
     pub trap_cx_ppn: PhysPageNum,
@@ -65,14 +94,29 @@ pub struct TaskControlBlockInner {
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
+    pub fd_name: Vec<Option<String>>,
 
     /// Heap bottom
     pub heap_bottom: usize,
 
     /// Program break
     pub program_brk: usize,
-}
 
+    /// program started time
+    pub started_time: usize,
+
+    /// program syscall times
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+    // pub syscall_times: Vec<u32>,
+    /// priority
+    pub priority: u8,
+
+    /// stride
+    pub stride: u8,
+
+    /// pass
+    pub pass: u8,
+}
 impl TaskControlBlockInner {
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
         self.trap_cx_ppn.get_mut()
@@ -91,6 +135,7 @@ impl TaskControlBlockInner {
             fd
         } else {
             self.fd_table.push(None);
+            self.fd_name.push(None);
             self.fd_table.len() - 1
         }
     }
@@ -133,8 +178,15 @@ impl TaskControlBlock {
                         // 2 -> stderr
                         Some(Arc::new(Stdout)),
                     ],
+                    fd_name: vec![None, None, None],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    started_time: get_time_ms(),
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    // syscall_times: vec![0; MAX_SYSCALL_NUM],
+                    priority: 16,
+                    stride: 0,
+                    pass: BIG_STRIDE / 16,
                 })
             },
         };
@@ -148,6 +200,14 @@ impl TaskControlBlock {
             trap_handler as usize,
         );
         task_control_block
+    }
+    /// spawn a process
+    pub fn spawn(self: &Arc<TaskControlBlock>, elf_data: &[u8]) -> Arc<TaskControlBlock> {
+        let task_control_block = TaskControlBlock::new(elf_data);
+        task_control_block.inner_exclusive_access().parent = Some(Arc::downgrade(self));
+        let task = Arc::new(task_control_block);
+        self.inner_exclusive_access().children.push(task.clone());
+        task
     }
 
     /// Load a new elf to replace the original application address space and start execution
@@ -193,6 +253,7 @@ impl TaskControlBlock {
         let kernel_stack_top = kernel_stack.get_top();
         // copy fd table
         let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
+        let new_fd_name: Vec<Option<String>> = parent_inner.fd_name.clone();
         for fd in parent_inner.fd_table.iter() {
             if let Some(file) = fd {
                 new_fd_table.push(Some(file.clone()));
@@ -214,8 +275,15 @@ impl TaskControlBlock {
                     children: Vec::new(),
                     exit_code: 0,
                     fd_table: new_fd_table,
+                    fd_name: new_fd_name,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    started_time: get_time_ms(),
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    // syscall_times: vec![0;MAX_SYSCALL_NUM],
+                    priority: 16,
+                    stride: 0,
+                    pass: BIG_STRIDE / 16,
                 })
             },
         });
