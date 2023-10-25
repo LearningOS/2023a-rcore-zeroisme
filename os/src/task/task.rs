@@ -1,13 +1,15 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{TRAP_CONTEXT_BASE, MAX_SYSCALL_NUM, BIG_STRIDE};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_ms;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use core::cmp::Ordering;
 
 /// Task control block structure
 ///
@@ -19,7 +21,6 @@ pub struct TaskControlBlock {
 
     /// Kernel stack corresponding to PID
     pub kernel_stack: KernelStack,
-
     /// Mutable
     inner: UPSafeCell<TaskControlBlockInner>,
 }
@@ -33,6 +34,34 @@ impl TaskControlBlock {
     pub fn get_user_token(&self) -> usize {
         let inner = self.inner_exclusive_access();
         inner.memory_set.token()
+    }
+}
+
+impl Ord for TaskControlBlock {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let inner = self.inner_exclusive_access();
+        let other_inner = other.inner_exclusive_access();
+        if inner.stride < other_inner.stride {
+            Ordering::Greater
+        } else if inner.stride == other_inner.stride {
+            Ordering::Equal
+        } else {
+            Ordering::Less
+        }
+    }
+}
+
+impl Eq for TaskControlBlock {}
+
+impl PartialEq for TaskControlBlock {
+    fn eq(&self, other: &Self) -> bool {
+        self.pid == other.pid
+    }
+}
+
+impl PartialOrd for TaskControlBlock {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -68,6 +97,22 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// program started time
+    pub started_time: usize,
+
+    /// program syscall times
+    pub syscall_times: [u32; MAX_SYSCALL_NUM],
+
+    /// priority
+    pub priority: u8,
+
+    /// stride
+    pub stride: u8,
+
+    /// pass
+    pub pass: u8,
+    
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +163,11 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    started_time: get_time_ms(),
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    priority: 16,
+                    stride: 0,
+                    pass: BIG_STRIDE / 16,
                 })
             },
         };
@@ -191,6 +241,11 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    started_time: get_time_ms(),
+                    syscall_times: [0; MAX_SYSCALL_NUM],
+                    priority: 16,
+                    stride: 0,
+                    pass: BIG_STRIDE / 16,
                 })
             },
         });
