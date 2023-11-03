@@ -202,6 +202,7 @@ pub fn sys_sbrk(size: i32) -> isize {
 
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
+// 通过与朱懿、bebopbe、lzx000821沟通，通过将生成tcb放入spawn方法中解决
 pub fn sys_spawn(path: *const u8) -> isize {
     let token = current_user_token();
     let path = translated_str(token, path);
