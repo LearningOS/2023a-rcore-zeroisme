@@ -15,6 +15,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
 
+const MAX_RESOURCE: usize = 50;
+const MAX_THREADS: usize = 50;
+
 /// Process Control Block
 pub struct ProcessControlBlock {
     /// immutable
@@ -49,6 +52,20 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// enabled_deadlock_detect
+    pub enabled_deadlock_detect: bool,
+    /// mutex available
+    pub mutex_available: Vec<u32>,
+    /// mutex allocation
+    pub mutex_allocation: Vec<Vec<u32>>,
+    /// mutex need
+    pub mutex_need: Vec<Vec<u32>>,
+    /// semaphore available
+    pub semaphore_available: Vec<u32>,
+    /// semaphore allocation
+    pub semaphore_allocation: Vec<Vec<u32>>,
+    /// semaphore need
+    pub semaphore_need: Vec<Vec<u32>>,
 }
 
 impl ProcessControlBlockInner {
@@ -82,6 +99,128 @@ impl ProcessControlBlockInner {
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
         self.tasks[tid].as_ref().unwrap().clone()
     }
+
+    /// add mutex resource
+    pub fn add_mutex_resource(&mut self, rid: usize) {
+        self.mutex_available[rid] = 1;
+    }
+
+    pub fn add_mutex_need(&mut self, tid: usize, rid: usize) {
+        self.mutex_need[tid][rid] += 1;
+    }
+
+    pub fn sub_mutex_need(&mut self, tid: usize, rid: usize) {
+        self.mutex_need[tid][rid] -= 1;
+    }
+
+    pub fn mutex_allocation(&mut self, tid: usize) {
+        for i in 0..MAX_RESOURCE {
+            self.mutex_available[i] -= self.mutex_need[tid][i];
+            self.mutex_allocation[tid][i] += self.mutex_need[tid][i];
+            self.mutex_need[tid][i] = 0;
+        }
+    }
+
+    pub fn mutex_deallocation(&mut self, tid: usize, rid: usize) {
+        self.mutex_allocation[tid][rid] -= 1;
+        self.mutex_available[rid] += 1;
+    }
+
+    pub fn mutex_deadlock_detect(&mut self) -> bool {
+        let thread_nums = self.thread_count();
+
+        let mut finish = vec![false; thread_nums];
+        let mut work = self.mutex_available.clone();
+        let mut count = 0;
+        while count < thread_nums {
+            let mut safe = false;
+            for i in 0..thread_nums {
+                if !finish[i] {
+                    let mut can_running = true;
+                    for j in 0..MAX_RESOURCE {
+                        if self.mutex_need[i][j] > work[j] {
+                            can_running = false;
+                            break;
+                        }
+                    }
+    
+                    if can_running {
+                        finish[i] = true;
+                        for j in 0..MAX_RESOURCE {
+                            work[j] += self.mutex_allocation[i][j];
+                        }
+                        safe = true;
+                        count += 1;
+                    }
+                }
+            }
+            if !safe {
+                return false;
+            }
+        }
+        true
+    }
+
+        /// add mutex resource
+        pub fn add_semaphore_resource(&mut self, rid: usize, count: u32) {
+            self.semaphore_available[rid] = count;
+        }
+    
+        pub fn add_semaphore_need(&mut self, tid: usize, rid: usize) {
+            self.semaphore_need[tid][rid] += 1;
+        }
+
+        pub fn sub_semaphore_need(&mut self, tid: usize, rid: usize) {
+            self.semaphore_need[tid][rid] -= 1;
+        }
+    
+        pub fn semaphore_allocation(&mut self, tid: usize) {
+            for i in 0..MAX_RESOURCE {
+                self.semaphore_available[i] -= self.semaphore_need[tid][i];
+                self.semaphore_allocation[tid][i] += self.semaphore_need[tid][i];
+                self.semaphore_need[tid][i] = 0;
+            }
+        }
+    
+        pub fn semaphore_deallocation(&mut self, tid: usize, rid: usize) {
+            self.semaphore_allocation[tid][rid] -= 1;
+            self.semaphore_available[rid] += 1;
+        }
+    
+        pub fn semaphore_deadlock_detect(&mut self) -> bool {
+            let thread_nums = self.thread_count();
+    
+            let mut finish = vec![false; thread_nums];
+            let mut work = self.semaphore_available.clone();
+            let mut count = 0;
+            while count < thread_nums {
+                let mut safe = false;
+                for i in 0..thread_nums {
+                    if !finish[i] {
+                        let mut can_running = true;
+                        for j in 0..MAX_RESOURCE {
+                            if self.semaphore_need[i][j] > work[j] {
+                                can_running = false;
+                                break;
+                            }
+                        }
+        
+                        if can_running {
+                            finish[i] = true;
+                            for j in 0..MAX_RESOURCE {
+                                work[j] += self.semaphore_allocation[i][j];
+                            }
+                            safe = true;
+                            count += 1;
+                        }
+                    }
+                }
+                if !safe {
+                    return false;
+                }
+            }
+            true
+        }
 }
 
 impl ProcessControlBlock {
@@ -119,6 +258,13 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    enabled_deadlock_detect: false,
+                    mutex_available: vec![0;MAX_RESOURCE],
+                    mutex_allocation: vec![vec![0;MAX_RESOURCE];MAX_THREADS],
+                    mutex_need: vec![vec![0;MAX_RESOURCE];MAX_THREADS],
+                    semaphore_available: vec![0;MAX_RESOURCE],
+                    semaphore_allocation: vec![vec![0;MAX_RESOURCE];MAX_THREADS],
+                    semaphore_need: vec![vec![0;MAX_RESOURCE];MAX_THREADS],
                 })
             },
         });
@@ -245,6 +391,13 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    enabled_deadlock_detect: false,
+                    mutex_available: vec![0;MAX_RESOURCE],
+                    mutex_allocation: vec![vec![0;MAX_RESOURCE];MAX_THREADS],
+                    mutex_need: vec![vec![0;MAX_RESOURCE];MAX_THREADS],
+                    semaphore_available: vec![0;MAX_RESOURCE],
+                    semaphore_allocation: vec![vec![0;MAX_RESOURCE];MAX_THREADS],
+                    semaphore_need: vec![vec![0;MAX_RESOURCE];MAX_THREADS],
                 })
             },
         });
